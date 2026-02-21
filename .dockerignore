@@ -1,0 +1,74 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+docs/
+
+# Tests
+tests/
+.pytest_cache
+.coverage
+
+# Development files
+.env.local
+.env.*.local
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs
+logs/
+*.log
+
+# Data files
+*.csv
+*.parquet
+*.json
+*.xlsx
+data/
+raw_data/
+processed_data/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Poetry files (will be rebuilt in container)
+poetry.lock
