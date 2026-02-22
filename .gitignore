@@ -87,11 +87,11 @@ ipython_config.py
 # Poetry files (will be rebuilt in container)
 poetry.lock
 
-# Allow 
-!
+# Allow .dockerignore
+!.dockerignore
 
-# pdm
-.pdm.toml
+# CI/CD files removed
+# .github/ directory intentionally excluded for version control only
 
 # PEP 582
 __pypackages__/
