@@ -35,6 +35,12 @@ from src.utils.snowflake_utils import (
     read_snowflake_to_df,
     load_df_to_snowflake,
 )
+from src.utils.api_utils import (
+    test_api_connection,
+    fetch_data_from_api,
+    api_data_to_dataframe,
+    APIClient,
+)
 
 app = typer.Typer(help="Data Pipeline Local Development CLI")
 console = Console()
@@ -278,6 +284,80 @@ def setup_env():
         console.print("[yellow]Please edit .env file with your credentials[/yellow]")
     else:
         console.print("[red]✗ .env.example file not found[/red]")
+
+
+@app.command()
+def test_api(
+    url: str = typer.Option(..., "--url", "-u", help="API endpoint URL to test"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Bearer token for authentication"),
+):
+    """Test connection to an API endpoint."""
+    console.print(f"[yellow]Testing API connection to: {url}[/yellow]")
+    
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    if test_api_connection(url, headers):
+        console.print("[green]✓ API connection successful[/green]")
+    else:
+        console.print("[red]✗ API connection failed[/red]")
+
+
+@app.command()
+def extract_api(
+    url: str = typer.Option(..., "--url", "-u", help="API endpoint URL"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="Bearer token for authentication"),
+    save_s3: bool = typer.Option(False, "--save-s3", help="Save extracted data to S3 raw folder"),
+    s3_key: Optional[str] = typer.Option(None, "--s3-key", help="S3 object key (optional, auto-generated if not provided)"),
+):
+    """Extract data from API and optionally save to S3 raw folder."""
+    console.print(f"[yellow]Extracting data from API: {url}[/yellow]")
+    
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        # Extract data from API
+        data = fetch_data_from_api(url, headers)
+        df = api_data_to_dataframe(data)
+        
+        console.print(f"[green]✓ Extracted {len(df)} records from API[/green]")
+        console.print(f"[blue]Columns: {list(df.columns)}[/blue]")
+        
+        # Display sample data
+        console.print("\n[bold]Sample Data:[/bold]")
+        console.print(df.head().to_string())
+        
+        # Save to S3 if requested
+        if save_s3:
+            from src.config.settings import get_settings
+            settings = get_settings()
+            bucket = settings.s3_bucket_name
+            
+            # Auto-generate key if not provided
+            if not s3_key:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                s3_key = f"raw/api_data_{timestamp}.parquet"
+            
+            # Ensure key starts with raw/
+            if not s3_key.startswith("raw/"):
+                s3_key = f"raw/{s3_key}"
+            
+            console.print(f"\n[yellow]Saving to S3: s3://{bucket}/{s3_key}[/yellow]")
+            
+            # Save to S3
+            success = save_df_to_s3(df, s3_key, bucket_name=bucket, file_format="parquet")
+            
+            if success:
+                console.print(f"[green]✓ Data saved to S3: s3://{bucket}/{s3_key}[/green]")
+            else:
+                console.print(f"[red]✗ Failed to save to S3[/red]")
+            
+    except Exception as e:
+        console.print(f"[red]✗ Failed to extract API data: {e}[/red]")
 
 
 if __name__ == "__main__":

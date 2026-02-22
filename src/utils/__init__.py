@@ -21,6 +21,12 @@ from .snowflake_utils import (
     load_df_to_snowflake,
     read_snowflake_to_df,
 )
+from .api_utils import (
+    test_api_connection,
+    fetch_data_from_api,
+    api_data_to_dataframe,
+    APIClient,
+)
 
 __all__ = [
     # Encryption utilities
@@ -36,4 +42,9 @@ __all__ = [
     "execute_snowflake_query",
     "load_df_to_snowflake",
     "read_snowflake_to_df",
+    # API utilities
+    "test_api_connection",
+    "fetch_data_from_api",
+    "api_data_to_dataframe",
+    "APIClient",
 ]
