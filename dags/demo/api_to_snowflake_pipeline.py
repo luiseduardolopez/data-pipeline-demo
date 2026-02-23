@@ -80,6 +80,11 @@ IDEMPOTENCY_KEY = "order_id"
             type="string",
             description="Target Snowflake table name"
         ),
+        "reset_state": Param(
+            default=False,
+            type="boolean",
+            description="Reset processing state to reprocess all records"
+        ),
     },
 )
 def api_to_snowflake_pipeline():
@@ -125,6 +130,15 @@ def api_to_snowflake_pipeline():
         
         since_timestamp = params.get("since_timestamp")
         use_last_processed = params.get("use_last_processed", False)
+        reset_state = params.get("reset_state", False)
+        
+        if reset_state:
+            state = {
+                "last_processed_timestamp": None,
+                "processed_ids": [],
+                "run_count": 0
+            }
+            LOG.info("Reset processing state - will reprocess all records")
         
         if use_last_processed and not since_timestamp:
             since_timestamp = state.get("last_processed_timestamp")
@@ -138,6 +152,7 @@ def api_to_snowflake_pipeline():
             "api_base_url": params.get("api_base_url", DEFAULT_API_BASE_URL),
             "api_endpoint": params.get("api_endpoint", DEFAULT_API_ENDPOINT),
             "snowflake_table": params.get("snowflake_table", "orders"),
+            "reset_state": reset_state,
         }
         
         LOG.info(f"Processing state: {processing_state}")
@@ -266,6 +281,8 @@ def api_to_snowflake_pipeline():
         
         Partition structure: s3://bucket/raw/year=YYYY/month=MM/day=DD/
         
+        Strategy: Overwrite daily file with new data (no deduplication)
+        
         Args:
             filter_result: Filtered records to save
             processing_state: Processing state
@@ -283,16 +300,10 @@ def api_to_snowflake_pipeline():
             return "no_records"
         
         partition_date = datetime.now()
-        if records and "created_at" in records[0]:
-            try:
-                partition_date = datetime.fromisoformat(records[0]["created_at"].replace("Z", "+00:00"))
-            except Exception:
-                pass
         
         year, month, day = partition_date.year, partition_date.month, partition_date.day
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        s3_key = f"raw/year={year}/month={month:02d}/day={day:02d}/orders_{timestamp}.json"
+        s3_key = f"raw/year={year}/month={month:02d}/day={day:02d}/orders_daily.json"
         
         json_data = json.dumps(records, indent=2, default=str)
         
@@ -307,7 +318,7 @@ def api_to_snowflake_pipeline():
         )
         
         s3_path = f"s3://{bucket_name}/{s3_key}"
-        LOG.info(f"Saved {len(records)} records to S3 raw: {s3_path}")
+        LOG.info(f"Overwrote S3 raw file with {len(records)} records: {s3_path}")
         
         return s3_path
     
@@ -384,6 +395,8 @@ def api_to_snowflake_pipeline():
         
         Partition structure: s3://bucket/curated/year=YYYY/month=MM/day=DD/
         
+        Strategy: Overwrite daily file with new data (no deduplication)
+        
         Args:
             transform_result: Transformed data
             processing_state: Processing state
@@ -401,16 +414,10 @@ def api_to_snowflake_pipeline():
         
         df = pd.DataFrame(transform_result["records"])
         
-        if "year" in df.columns and len(df) > 0:
-            year = int(df["year"].iloc[0])
-            month = int(df["month"].iloc[0])
-            day = int(df["day"].iloc[0])
-        else:
-            now = datetime.now()
-            year, month, day = now.year, now.month, now.day
+        now = datetime.now()
+        year, month, day = now.year, now.month, now.day
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        s3_key = f"curated/year={year}/month={month:02d}/day={day:02d}/orders_{timestamp}.parquet"
+        s3_key = f"curated/year={year}/month={month:02d}/day={day:02d}/orders_daily.parquet"
         
         parquet_buffer = df.to_parquet(index=False)
         
@@ -425,7 +432,7 @@ def api_to_snowflake_pipeline():
         )
         
         s3_path = f"s3://{bucket_name}/{s3_key}"
-        LOG.info(f"Saved {len(df)} records to S3 curated: {s3_path}")
+        LOG.info(f"Overwrote S3 curated file with {len(df)} records: {s3_path}")
         
         return s3_path
     
