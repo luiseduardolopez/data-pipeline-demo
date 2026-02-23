@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -308,7 +309,7 @@ def api_to_snowflake_pipeline():
         
         # Upload to S3
         s3_hook = S3Hook(aws_conn_id="aws_default")
-        bucket_name = s3_hook.get_bucket("data-pipeline-luis-demo-bucket")
+        bucket_name = "data-pipeline-luis-demo-bucket"
         
         s3_hook.load_string(
             string_data=json_data,
@@ -326,7 +327,6 @@ def api_to_snowflake_pipeline():
     def transform_to_curated(filter_result: Dict[str, Any], s3_raw_path: str, **context) -> Dict[str, Any]:
         """
         Transform raw data to curated format.
-        
         Transformations:
         - Standardize column names
         - Parse dates
@@ -387,8 +387,14 @@ def api_to_snowflake_pipeline():
         
         LOG.info(f"Transformation complete: {len(df)} records")
         
+        # --- FIX: Convert Timestamps to Strings for JSON Serialization ---
+        # Airflow XCom uses JSON serialization by default, which fails with Pandas Timestamp objects.
+        # We convert to JSON string (using Pandas iso format) and load back to Python dicts.
+        records_json = df.to_json(orient="records", date_format="iso")
+        records_clean = json.loads(records_json)
+        
         return {
-            "records": df.to_dict("records"),
+            "records": records_clean,
             "count": len(df),
             "columns": list(df.columns),
         }
@@ -431,11 +437,12 @@ def api_to_snowflake_pipeline():
         s3_key = f"curated/year={year}/month={month:02d}/day={day:02d}/orders_{timestamp}.parquet"
         
         # Convert to Parquet bytes
+        # Note: Parquet handles string dates well, or we could convert back to datetime
         parquet_buffer = df.to_parquet(index=False)
         
         # Upload to S3
         s3_hook = S3Hook(aws_conn_id="aws_default")
-        bucket_name = s3_hook.get_bucket("data-pipeline-luis-demo-bucket")
+        bucket_name = "data-pipeline-luis-demo-bucket"
         
         s3_hook.load_bytes(
             bytes_data=parquet_buffer,
@@ -478,6 +485,12 @@ def api_to_snowflake_pipeline():
         table_name = processing_state["snowflake_table"]
         df = pd.DataFrame(transform_result["records"])
         
+        # Ensure dates are parsed back from strings (from XCom) to datetimes for correct SQL types
+        date_cols = ["created_at", "updated_at", "order_date"]
+        for col in date_cols:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        
         LOG.info(f"Loading {len(df)} records to Snowflake table: {table_name}")
         
         snowflake_hook = SnowflakeHook(snowflake_conn_id="snowflake_default")
@@ -487,6 +500,13 @@ def api_to_snowflake_pipeline():
         cursor = conn.cursor()
         
         try:
+            # Set database and schema context
+            database = os.getenv("SNOWFLAKE_DATABASE", "DATA_PIPELINE_DB")
+            schema = os.getenv("SNOWFLAKE_SCHEMA", "RAW_DATA")
+            
+            cursor.execute(f"USE DATABASE {database}")
+            cursor.execute(f"USE SCHEMA {schema}")
+            
             # Create table if not exists
             columns_with_types = []
             for col in df.columns:
@@ -501,10 +521,22 @@ def api_to_snowflake_pipeline():
                 else:
                     columns_with_types.append(f'"{col}" VARCHAR')
             
+            # Validate that idempotency key exists in DataFrame
+            LOG.info(f"DataFrame columns: {list(df.columns)}")
+            LOG.info(f"Looking for idempotency key: '{IDEMPOTENCY_KEY}'")
+            
+            primary_key = IDEMPOTENCY_KEY
+            if IDEMPOTENCY_KEY not in df.columns:
+                available_cols = ", ".join(df.columns.tolist())
+                LOG.warning(f"Idempotency key '{IDEMPOTENCY_KEY}' not found in DataFrame. Available columns: {available_cols}")
+                # Use first column as primary key instead of failing
+                primary_key = df.columns[0]
+                LOG.info(f"Using '{primary_key}' as primary key instead")
+            
             create_table_sql = f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
                 {', '.join(columns_with_types)},
-                PRIMARY KEY ({IDEMPOTENCY_KEY})
+                PRIMARY KEY ("{primary_key}")
             )
             """
             cursor.execute(create_table_sql)
@@ -521,6 +553,9 @@ def api_to_snowflake_pipeline():
             
             # Insert data into staging table
             # Convert DataFrame to list of tuples for insertion
+            # Handle potential NaT/NaN values for SQL
+            df = df.where(pd.notnull(df), None)
+            
             values = [tuple(row) for row in df.values]
             columns = [f'"{col}"' for col in df.columns]
             
@@ -535,9 +570,9 @@ def api_to_snowflake_pipeline():
             merge_sql = f"""
             MERGE INTO {table_name} AS target
             USING {staging_table} AS source
-            ON target.{IDEMPOTENCY_KEY} = source.{IDEMPOTENCY_KEY}
+            ON target."{primary_key}" = source."{primary_key}"
             WHEN MATCHED THEN UPDATE SET
-                {', '.join([f'target."{col}" = source."{col}"' for col in df.columns if col != IDEMPOTENCY_KEY])}
+                {', '.join([f'target."{col}" = source."{col}"' for col in df.columns if col != primary_key])}
             WHEN NOT MATCHED THEN INSERT
                 ({', '.join([f'"{col}"' for col in df.columns])})
                 VALUES ({', '.join([f'source."{col}"' for col in df.columns])})
