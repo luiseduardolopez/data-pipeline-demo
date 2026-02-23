@@ -33,19 +33,19 @@ from tenacity import (
 )
 
 import pandas as pd
+import numpy as np
 
 LOG = logging.getLogger(__name__)
 
-# Default API configuration
 DEFAULT_API_BASE_URL = "https://45e984f2-4d86-4067-804a-e96dc24789ed.mock.pstmn.io"
 DEFAULT_API_ENDPOINT = "api/v1/orders"
-IDEMPOTENCY_KEY = "order_id"  # Column used for deduplication
+IDEMPOTENCY_KEY = "order_id"
 
 
 @dag(
     dag_id="api_to_snowflake_pipeline",
     start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
-    schedule=None,  # Trigger manually or via API
+    schedule=None,
     catchup=False,
     tags=["api", "etl", "snowflake", "s3", "production"],
     description="Production ETL: API → S3 (raw/curated) → Snowflake with idempotency",
@@ -113,7 +113,6 @@ def api_to_snowflake_pipeline():
         
         params = context["params"]
         
-        # Try to get state from Airflow Variable
         state_var_name = "api_pipeline_state"
         try:
             state = Variable.get(state_var_name, deserialize_json=True)
@@ -124,7 +123,6 @@ def api_to_snowflake_pipeline():
                 "run_count": 0
             }
         
-        # Determine the 'since' timestamp
         since_timestamp = params.get("since_timestamp")
         use_last_processed = params.get("use_last_processed", False)
         
@@ -168,7 +166,6 @@ def api_to_snowflake_pipeline():
         if since_timestamp:
             LOG.info(f"Incremental: records after {since_timestamp}")
         
-        # Retry configuration: 3 attempts with exponential backoff (4s, 8s, 16s)
         @retry(
             retry=retry_if_exception_type((requests.RequestException, Exception)),
             stop=stop_after_attempt(3),
@@ -188,15 +185,12 @@ def api_to_snowflake_pipeline():
         try:
             data = _fetch_data()
             
-            # Handle different response formats
             if isinstance(data, dict):
-                # Look for common data container keys
                 for key in ["data", "results", "items", "records", "orders"]:
                     if key in data:
                         records = data[key]
                         break
                 else:
-                    # If single record, wrap in list
                     records = [data]
             elif isinstance(data, list):
                 records = data
@@ -239,11 +233,9 @@ def api_to_snowflake_pipeline():
         for record in records:
             record_id = str(record.get(IDEMPOTENCY_KEY, ""))
             
-            # Skip if already processed (idempotency)
             if record_id in processed_ids:
                 continue
             
-            # Skip if older than 'since' timestamp (incremental)
             if since_timestamp and "created_at" in record:
                 try:
                     record_time = datetime.fromisoformat(record["created_at"].replace("Z", "+00:00"))
@@ -251,7 +243,7 @@ def api_to_snowflake_pipeline():
                     if record_time <= since_time:
                         continue
                 except Exception:
-                    pass  # Keep record if timestamp parsing fails
+                    pass
             
             new_records.append(record)
             new_ids.append(record_id)
@@ -290,7 +282,6 @@ def api_to_snowflake_pipeline():
             LOG.info("No records to save to S3 raw")
             return "no_records"
         
-        # Determine partition date from first record
         partition_date = datetime.now()
         if records and "created_at" in records[0]:
             try:
@@ -300,14 +291,11 @@ def api_to_snowflake_pipeline():
         
         year, month, day = partition_date.year, partition_date.month, partition_date.day
         
-        # Generate S3 key with Hive-style partitioning
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         s3_key = f"raw/year={year}/month={month:02d}/day={day:02d}/orders_{timestamp}.json"
         
-        # Convert records to JSON
         json_data = json.dumps(records, indent=2, default=str)
         
-        # Upload to S3
         s3_hook = S3Hook(aws_conn_id="aws_default")
         bucket_name = "data-pipeline-luis-demo-bucket"
         
@@ -346,38 +334,31 @@ def api_to_snowflake_pipeline():
             LOG.info("No records to transform")
             return {"records": [], "df": None, "count": 0}
         
-        # Convert to DataFrame
         df = pd.DataFrame(records)
         
         LOG.info(f"Transforming {len(df)} records")
         
-        # Standardize column names
         df.columns = [col.lower().replace(" ", "_") for col in df.columns]
         
-        # Add ETL metadata
         df["_etl_processed_at"] = datetime.now().isoformat()
         df["_etl_batch_id"] = datetime.now().strftime("%Y%m%d_%H%M%S")
         df["_etl_source"] = "api"
         
-        # Parse date columns
         date_cols = ["created_at", "updated_at", "order_date"]
         for col in date_cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         
-        # Add partition columns from created_at
         if "created_at" in df.columns:
             df["year"] = df["created_at"].dt.year
             df["month"] = df["created_at"].dt.month
             df["day"] = df["created_at"].dt.day
         else:
-            # Use current date if no created_at
             now = datetime.now()
             df["year"] = now.year
             df["month"] = now.month
             df["day"] = now.day
         
-        # Remove duplicates based on idempotency key
         if IDEMPOTENCY_KEY in df.columns:
             before_count = len(df)
             df = df.drop_duplicates(subset=[IDEMPOTENCY_KEY], keep="last")
@@ -387,9 +368,6 @@ def api_to_snowflake_pipeline():
         
         LOG.info(f"Transformation complete: {len(df)} records")
         
-        # --- FIX: Convert Timestamps to Strings for JSON Serialization ---
-        # Airflow XCom uses JSON serialization by default, which fails with Pandas Timestamp objects.
-        # We convert to JSON string (using Pandas iso format) and load back to Python dicts.
         records_json = df.to_json(orient="records", date_format="iso")
         records_clean = json.loads(records_json)
         
@@ -423,7 +401,6 @@ def api_to_snowflake_pipeline():
         
         df = pd.DataFrame(transform_result["records"])
         
-        # Determine partition from data
         if "year" in df.columns and len(df) > 0:
             year = int(df["year"].iloc[0])
             month = int(df["month"].iloc[0])
@@ -432,15 +409,11 @@ def api_to_snowflake_pipeline():
             now = datetime.now()
             year, month, day = now.year, now.month, now.day
         
-        # Generate S3 key
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         s3_key = f"curated/year={year}/month={month:02d}/day={day:02d}/orders_{timestamp}.parquet"
         
-        # Convert to Parquet bytes
-        # Note: Parquet handles string dates well, or we could convert back to datetime
         parquet_buffer = df.to_parquet(index=False)
         
-        # Upload to S3
         s3_hook = S3Hook(aws_conn_id="aws_default")
         bucket_name = "data-pipeline-luis-demo-bucket"
         
@@ -485,7 +458,6 @@ def api_to_snowflake_pipeline():
         table_name = processing_state["snowflake_table"]
         df = pd.DataFrame(transform_result["records"])
         
-        # Ensure dates are parsed back from strings (from XCom) to datetimes for correct SQL types
         date_cols = ["created_at", "updated_at", "order_date"]
         for col in date_cols:
             if col in df.columns:
@@ -493,21 +465,29 @@ def api_to_snowflake_pipeline():
         
         LOG.info(f"Loading {len(df)} records to Snowflake table: {table_name}")
         
-        snowflake_hook = SnowflakeHook(snowflake_conn_id="snowflake_default")
+        import snowflake.connector
         
-        # Get connection and cursor
-        conn = snowflake_hook.get_conn()
+        sf_user = os.getenv("SNOWFLAKE_USER")
+        sf_password = os.getenv("SNOWFLAKE_PASSWORD")
+        sf_account = os.getenv("SNOWFLAKE_ACCOUNT")
+        sf_warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+        database = os.getenv("SNOWFLAKE_DATABASE", "DATA_PIPELINE_DB")
+        schema = os.getenv("SNOWFLAKE_SCHEMA", "RAW_DATA")
+        
+        if not all([sf_user, sf_password, sf_account, sf_warehouse]):
+            raise ValueError("Missing Snowflake credentials in environment variables")
+        
+        conn = snowflake.connector.connect(
+            user=sf_user,
+            password=sf_password,
+            account=sf_account,
+            warehouse=sf_warehouse,
+            database=database,
+            schema=schema
+        )
         cursor = conn.cursor()
         
         try:
-            # Set database and schema context
-            database = os.getenv("SNOWFLAKE_DATABASE", "DATA_PIPELINE_DB")
-            schema = os.getenv("SNOWFLAKE_SCHEMA", "RAW_DATA")
-            
-            cursor.execute(f"USE DATABASE {database}")
-            cursor.execute(f"USE SCHEMA {schema}")
-            
-            # Create table if not exists
             columns_with_types = []
             for col in df.columns:
                 if df[col].dtype == "object":
@@ -521,7 +501,6 @@ def api_to_snowflake_pipeline():
                 else:
                     columns_with_types.append(f'"{col}" VARCHAR')
             
-            # Validate that idempotency key exists in DataFrame
             LOG.info(f"DataFrame columns: {list(df.columns)}")
             LOG.info(f"Looking for idempotency key: '{IDEMPOTENCY_KEY}'")
             
@@ -529,7 +508,6 @@ def api_to_snowflake_pipeline():
             if IDEMPOTENCY_KEY not in df.columns:
                 available_cols = ", ".join(df.columns.tolist())
                 LOG.warning(f"Idempotency key '{IDEMPOTENCY_KEY}' not found in DataFrame. Available columns: {available_cols}")
-                # Use first column as primary key instead of failing
                 primary_key = df.columns[0]
                 LOG.info(f"Using '{primary_key}' as primary key instead")
             
@@ -541,8 +519,6 @@ def api_to_snowflake_pipeline():
             """
             cursor.execute(create_table_sql)
             
-            # Use MERGE for idempotency
-            # First, create temporary staging table
             staging_table = f"{table_name}_staging_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
             create_staging_sql = f"""
@@ -551,10 +527,30 @@ def api_to_snowflake_pipeline():
             """
             cursor.execute(create_staging_sql)
             
-            # Insert data into staging table
-            # Convert DataFrame to list of tuples for insertion
-            # Handle potential NaT/NaN values for SQL
-            df = df.where(pd.notnull(df), None)
+            df = df.replace({np.nan: None, pd.NaT: None, 'NaN': None, 'nan': None})
+            
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = df[col].apply(lambda x: None if x is None or (isinstance(x, str) and (x == 'NaN' or x == 'nan' or x == '')) else x)
+            
+            for col in df.columns:
+                if "datetime" in str(df[col].dtype):
+                    df[col] = df[col].fillna(pd.Timestamp.now()).astype(str)
+                elif df[col].dtype == "object":
+                    df[col] = df[col].apply(
+                        lambda x: json.dumps(x) if isinstance(x, (dict, list)) else str(x) if x is not None else None
+                    )
+                elif df[col].dtype in ["float64", "float32"]:
+                    if col in ["year", "month", "day"]:
+                        df[col] = df[col].fillna(0).astype(int)
+                    else:
+                        df[col] = df[col].where(pd.notna(df[col]), None).astype(int)
+                else:
+                    df[col] = df[col].fillna(None)
+            
+            df = df.replace({'NaN': None, 'nan': None, '': None})
+            
+            LOG.info(f"Sample data after cleaning: {df.head(1).to_dict() if len(df) > 0 else 'No data'}")
             
             values = [tuple(row) for row in df.values]
             columns = [f'"{col}"' for col in df.columns]
@@ -565,8 +561,6 @@ def api_to_snowflake_pipeline():
             """
             cursor.executemany(insert_sql, values)
             
-            # MERGE staging into target table (idempotency technique)
-            # This ensures no duplicates even if DAG runs multiple times
             merge_sql = f"""
             MERGE INTO {table_name} AS target
             USING {staging_table} AS source
@@ -579,7 +573,6 @@ def api_to_snowflake_pipeline():
             """
             cursor.execute(merge_sql)
             
-            # Drop staging table
             cursor.execute(f"DROP TABLE IF EXISTS {staging_table}")
             
             conn.commit()
@@ -625,7 +618,6 @@ def api_to_snowflake_pipeline():
         
         state_var_name = "api_pipeline_state"
         
-        # Get current state
         try:
             current_state = Variable.get(state_var_name, deserialize_json=True)
         except Exception:
@@ -635,14 +627,12 @@ def api_to_snowflake_pipeline():
                 "run_count": 0
             }
         
-        # Update state
         current_state["last_processed_timestamp"] = datetime.now().isoformat()
         current_state["processed_ids"] = list(set(
             current_state.get("processed_ids", []) + filter_result.get("new_ids", [])
         ))
         current_state["run_count"] = current_state.get("run_count", 0) + 1
         
-        # Save state
         Variable.set(state_var_name, current_state, serialize_json=True)
         
         LOG.info(f"Updated processing state: {len(current_state['processed_ids'])} total IDs, {current_state['run_count']} runs")
@@ -673,7 +663,6 @@ def api_to_snowflake_pipeline():
             "range_checks": {},
         }
         
-        # Null checks for critical columns
         critical_cols = [IDEMPOTENCY_KEY, "created_at"]
         for col in critical_cols:
             if col in df.columns:
@@ -684,7 +673,6 @@ def api_to_snowflake_pipeline():
                     "passed": null_count == 0
                 }
         
-        # Uniqueness check on idempotency key
         if IDEMPOTENCY_KEY in df.columns:
             dup_count = df[IDEMPOTENCY_KEY].duplicated().sum()
             checks["uniqueness_checks"][IDEMPOTENCY_KEY] = {
@@ -692,14 +680,12 @@ def api_to_snowflake_pipeline():
                 "passed": dup_count == 0
             }
         
-        # Type checks
         if "amount" in df.columns:
             checks["type_checks"]["amount"] = {
                 "type": str(df["amount"].dtype),
                 "is_numeric": pd.api.types.is_numeric_dtype(df["amount"])
             }
         
-        # Range checks
         if "amount" in df.columns and pd.api.types.is_numeric_dtype(df["amount"]):
             checks["range_checks"]["amount"] = {
                 "min": float(df["amount"].min()),
@@ -707,7 +693,6 @@ def api_to_snowflake_pipeline():
                 "mean": float(df["amount"].mean()),
             }
         
-        # Overall status
         all_passed = all(
             check.get("passed", True)
             for check_type in ["null_checks", "uniqueness_checks"]
@@ -719,7 +704,6 @@ def api_to_snowflake_pipeline():
         
         return checks
     
-    # Define task flow
     processing_state = get_processing_state()
     
     extraction_result = extract_from_api(processing_state)
@@ -738,12 +722,10 @@ def api_to_snowflake_pipeline():
     
     state_updated = update_processing_state(filter_result, snowflake_success, processing_state)
     
-    # Dependencies
     start >> processing_state >> extraction_result >> filter_result >> s3_raw_path
     s3_raw_path >> transform_result >> s3_curated_path
     transform_result >> quality_result
     s3_curated_path >> snowflake_success >> state_updated >> end
 
 
-# Instantiate DAG
 api_to_snowflake_pipeline_dag = api_to_snowflake_pipeline()

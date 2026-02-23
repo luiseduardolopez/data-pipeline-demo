@@ -14,7 +14,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-# Add src to Python path for local development
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
@@ -77,7 +76,6 @@ def test_connections():
     """Test all configured connections."""
     console.print("[bold blue]Testing Connections...[/bold blue]")
     
-    # Test S3
     console.print("\n[yellow]Testing S3 Connection...[/yellow]")
     try:
         s3_ok = check_s3_connection()
@@ -88,7 +86,6 @@ def test_connections():
     except Exception as e:
         console.print(f"[red]✗ S3 connection error: {e}[/red]")
     
-    # Test Snowflake
     console.print("\n[yellow]Testing Snowflake Connection...[/yellow]")
     try:
         snowflake_ok = check_snowflake_connection()
@@ -117,7 +114,7 @@ def list_s3_files(prefix: str = ""):
         table.add_column("Size", style="green")
         
         for file_path in files:
-            table.add_row(file_path, "N/A")  # Size would require additional API calls
+            table.add_row(file_path, "N/A")
         
         console.print(table)
         console.print(f"\n[green]Total files: {len(files)}[/green]")
@@ -135,7 +132,6 @@ def test_encryption():
         import pandas as pd
         import numpy as np
         
-        # Create test data
         test_data = pd.DataFrame({
             "id": [1, 2, 3],
             "name": ["Alice", "Bob", "Charlie"],
@@ -146,7 +142,6 @@ def test_encryption():
         console.print("\n[yellow]Original Data:[/yellow]")
         console.print(test_data.to_string(index=False))
         
-        # Encrypt sensitive columns
         sensitive_cols = ["ssn", "credit_card"]
         encrypted_data = encrypt_dataframe_columns(
             test_data, 
@@ -157,7 +152,6 @@ def test_encryption():
         console.print("\n[yellow]Encrypted Data:[/yellow]")
         console.print(encrypted_data.to_string(index=False))
         
-        # Decrypt columns
         decrypted_data = decrypt_dataframe_columns(
             encrypted_data,
             columns=sensitive_cols,
@@ -167,7 +161,6 @@ def test_encryption():
         console.print("\n[yellow]Decrypted Data:[/yellow]")
         console.print(decrypted_data.to_string(index=False))
         
-        # Verify data integrity
         if test_data.equals(decrypted_data):
             console.print("\n[green]✓ Encryption/Decryption test passed[/green]")
         else:
@@ -190,7 +183,6 @@ def generate_sample_data(
         import numpy as np
         from datetime import datetime, timedelta
         
-        # Generate sample data
         np.random.seed(42)
         
         data = {
@@ -213,7 +205,6 @@ def generate_sample_data(
         
         df = pd.DataFrame(data)
         
-        # Save to CSV
         df.to_csv(output_file, index=False)
         console.print(f"[green]✓ Sample data saved to {output_file}[/green]")
         console.print(f"[green]Generated {len(df)} records[/green]")
@@ -241,15 +232,12 @@ def upload_to_s3(
     try:
         import pandas as pd
         
-        # Read the file
         df = pd.read_csv(file_path)
         
-        # Parse encryption columns
         columns_to_encrypt = None
         if encrypt_cols:
             columns_to_encrypt = [col.strip() for col in encrypt_cols.split(",")]
         
-        # Upload to S3
         success = save_df_to_s3(
             df=df,
             s3_key=s3_key,
@@ -319,36 +307,30 @@ def extract_api(
         headers["Authorization"] = f"Bearer {token}"
     
     try:
-        # Extract data from API
         data = fetch_data_from_api(url, headers)
         df = api_data_to_dataframe(data)
         
         console.print(f"[green]✓ Extracted {len(df)} records from API[/green]")
         console.print(f"[blue]Columns: {list(df.columns)}[/blue]")
         
-        # Display sample data
         console.print("\n[bold]Sample Data:[/bold]")
         console.print(df.head().to_string())
         
-        # Save to S3 if requested
         if save_s3:
             from src.config.settings import get_settings
             settings = get_settings()
             bucket = settings.s3_bucket_name
             
-            # Auto-generate key if not provided
             if not s3_key:
                 from datetime import datetime
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 s3_key = f"raw/api_data_{timestamp}.parquet"
             
-            # Ensure key starts with raw/
             if not s3_key.startswith("raw/"):
                 s3_key = f"raw/{s3_key}"
             
             console.print(f"\n[yellow]Saving to S3: s3://{bucket}/{s3_key}[/yellow]")
             
-            # Save to S3
             success = save_df_to_s3(df, s3_key, bucket_name=bucket, file_format="parquet")
             
             if success:
@@ -361,6 +343,5 @@ def extract_api(
 
 
 if __name__ == "__main__":
-    # Set environment for local development
     os.environ["PIPELINE_RUN_LOCAL"] = "true"
     app()
